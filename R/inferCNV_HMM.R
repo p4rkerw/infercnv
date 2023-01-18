@@ -1,4 +1,3 @@
-
 #' @title get_spike_dists
 #'
 #' @description determines the N(mean,sd) parameters for each of the CNV states based on
@@ -371,7 +370,7 @@ predict_CNV_via_HMM_on_tumor_subclusters  <- function(infercnv_obj,
     tumor_subclusters <- unlist(infercnv_obj@tumor_subclusters[["subclusters"]], recursive=FALSE)
     
     ## add the normals, so they get predictions too:
-    #tumor_subclusters <- c(tumor_subclusters, infercnv_obj@reference_grouped_cell_indices)
+    tumor_subclusters <- c(tumor_subclusters, infercnv_obj@reference_grouped_cell_indices)
     
     ## run through each chr separately
     lapply(chrs, function(chr) {
@@ -385,7 +384,7 @@ predict_CNV_via_HMM_on_tumor_subclusters  <- function(infercnv_obj,
             num_cells = length(tumor_subcluster_cells_idx)
 
             state_emission_params <- .get_state_emission_params(num_cells, cnv_mean_sd, cnv_level_to_mean_sd_fit)
-
+                        
             hmm <- HiddenMarkov::dthmm(gene_expr_vals,
                                        HMM_info[['state_transitions']],
                                        HMM_info[['delta']],
@@ -394,7 +393,7 @@ predict_CNV_via_HMM_on_tumor_subclusters  <- function(infercnv_obj,
             
             ## hmm_trace <- HiddenMarkov::Viterbi(hmm)
             hmm_trace <- Viterbi.dthmm.adj(hmm)
-
+            
             hmm.data[chr_gene_idx,tumor_subcluster_cells_idx] <<- hmm_trace
         })
     })
@@ -406,73 +405,6 @@ predict_CNV_via_HMM_on_tumor_subclusters  <- function(infercnv_obj,
     return(infercnv_obj)
     
 }
-
-
-
-predict_CNV_via_HMM_on_tumor_subclusters_per_chr  <- function(infercnv_obj,
-                                                              subclusters_per_chr,
-                                                              cnv_mean_sd=get_spike_dists(infercnv_obj@.hspike),
-                                                              cnv_level_to_mean_sd_fit=get_hspike_cnv_mean_sd_trend_by_num_cells_fit(infercnv_obj@.hspike),
-                                                              t=1e-6
-                                                              ) {
-    
-
-    flog.info("predict_CNV_via_HMM_on_tumor_subclusters_per_chr")
-
-    if (is.null(subclusters_per_chr)) {
-        flog.warn("No subclusters defined, so instead running on whole samples")
-        return(predict_CNV_via_HMM_on_whole_tumor_samples(infercnv_obj, cnv_mean_sd, cnv_level_to_mean_sd_fit, t));
-    }
-    
-    
-    HMM_info  <- .get_HMM(cnv_mean_sd, t)
-    
-    chrs = unique(infercnv_obj@gene_order$chr)
-    
-    expr.data = infercnv_obj@expr.data
-    gene_order = infercnv_obj@gene_order
-    hmm.data = expr.data
-    hmm.data[,] = -1 #init to invalid state
-
-    tumor_subclusters <- unlist(infercnv_obj@tumor_subclusters[["subclusters"]], recursive=FALSE)
-    
-    ## add the normals, so they get predictions too:
-    #tumor_subclusters <- c(tumor_subclusters, infercnv_obj@reference_grouped_cell_indices)
-    
-    ## run through each chr separately
-    lapply(chrs, function(chr) {
-        chr_gene_idx = which(gene_order$chr == chr)
-        
-        ## run through each cell for this chromosome:
-        lapply(subclusters_per_chr[[chr]], function(subcluster_cells_idx) {
-            
-            gene_expr_vals = rowMeans(expr.data[chr_gene_idx,subcluster_cells_idx,drop=FALSE])
-            
-            num_cells = length(subcluster_cells_idx)
-
-            state_emission_params <- .get_state_emission_params(num_cells, cnv_mean_sd, cnv_level_to_mean_sd_fit)
-            
-            hmm <- HiddenMarkov::dthmm(gene_expr_vals,
-                                       HMM_info[['state_transitions']],
-                                       HMM_info[['delta']],
-                                       "norm",
-                                       state_emission_params)
-            
-            ## hmm_trace <- HiddenMarkov::Viterbi(hmm)
-            hmm_trace <- Viterbi.dthmm.adj(hmm)
-            
-            hmm.data[chr_gene_idx,subcluster_cells_idx] <<- hmm_trace
-        })
-    })
-    
-    infercnv_obj@expr.data <- hmm.data
-
-    flog.info("-done predicting CNV based on initial tumor subclusters")
-        
-    return(infercnv_obj)
-    
-}
-
 
 #' @title predict_CNV_via_HMM_on_whole_tumor_samples
 #'
@@ -710,38 +642,53 @@ get_predicted_CNV_regions <- function(infercnv_obj, by=c("consensus", "subcluste
     else {
         stop("Error, shouldn't get here ... bug")
     }
-    
-    cnv_regions = list()
 
-    cnv_counter_start = 0
-    for (cell_group_name in names(cell_groups)) {
-        
+    mc.cores = infercnv.env$GLOBAL_NUM_THREADS
+    futile.logger::flog.info(paste("Processing cnv regions in parallel with", mc.cores, "cores"))
+
+    num_cell_groups = length(cell_groups)
+    cell_group_names = names(cell_groups)
+
+    state_par_func <- function(i){
+        cell_group_name = cell_group_names[[i]]
         cell_group = cell_groups[[cell_group_name]]
-        #flog.info(sprintf("cell group %s -> %s", cell_group_name, cell_group))
+        flog.info(sprintf("-processing cell_group_name: %s, size: %d",
+                          cell_group_name, length(cell_group)))
 
-        flog.info(sprintf("-processing cell_group_name: %s, size: %d", cell_group_name, length(cell_group)))
-                
         cell_group_mtx = infercnv_obj@expr.data[,cell_group,drop=FALSE]
-        cell_group_names = colnames(cell_group_mtx)
 
         state_consensus <- .get_state_consensus(cell_group_mtx)
-        
+
         names(state_consensus) <- rownames(cell_group_mtx)
-        cnv_gene_regions <- .define_cnv_gene_regions(state_consensus, infercnv_obj@gene_order, cnv_counter_start)
+        cnv_gene_regions <- .define_cnv_gene_regions(state_consensus,
+                                                     infercnv_obj@gene_order)
+
+        cnv_region_list = list(cell_group_name=cell_group_name,
+                               cells=colnames(cell_group_mtx),
+                               gene_regions=cnv_gene_regions)
+        cnv_region_list
+
+     }
+
+    unnamed_cnv_regions <- parallel::mclapply(seq_along(cell_groups),
+                                              FUN = state_par_func,
+                                              mc.cores = mc.cores)
+
+    # updates regions with unique name
+    named_cnv_regions = list()
+    cnv_counter_start = 0
+    for (i in 1:num_cell_groups) {
+        cnv_gene_regions <- .rename_cnv_gene_regions(unnamed_cnv_regions[[i]]$gene_regions, cnv_counter_start)
+        cnv_counter_start = cnv_counter_start + length(cnv_gene_regions)
         cnv_ranges <- .get_cnv_gene_region_bounds(cnv_gene_regions)
 
-        consensus_state_list = list(cell_group_name=cell_group_name,
-                                    cells=cell_group_names,
-                                    gene_regions=cnv_gene_regions,
-                                    cnv_ranges=cnv_ranges)
-        
-        cnv_regions[[length(cnv_regions)+1]] = consensus_state_list
-
-        cnv_counter_start = cnv_counter_start + length(cnv_gene_regions)
-        
+        named_cnv_regions[[i]] = list(cell_group_name=unnamed_cnv_regions[[i]]$cell_group_name,
+                               cells=unnamed_cnv_regions[[i]]$cells,
+                               gene_regions=cnv_gene_regions,
+                               cnv_ranges=cnv_ranges)
     }
     
-    return(cnv_regions)
+    return(named_cnv_regions)
     
 }
 
@@ -780,6 +727,7 @@ generate_cnv_region_reports <- function(infercnv_obj,
 
     ## cell clusters defined.
     cell_clusters_outfile = paste(out_dir, paste0(output_filename_prefix, ".cell_groupings"), sep="/")
+    flog.info(sprintf("-before writing cell clusters file: %s", cell_clusters_outfile))
 
     cell_clusters_df = lapply(cnv_regions, function(x) {
         cell_group_name = x$cell_group_name
@@ -968,25 +916,89 @@ adjust_genes_regions_report <- function(hmm.infercnv_obj,
     return(consensus)
 }
 
-
-#' @title .define_cnv_gene_regions
+#' @title .get_num_cnv_gene_regions
 #'
-#' @description Given the state consensus vector and gene order info, defines cnv regions
-#' based on consistent ordering and cnv state 
+#' @description gets the number of cnv regions for a given state consensus vector
 #'
 #' @param state_consensus state consensus vector
 #'
 #' @param gene_order the infercnv_obj@gene_order info
+#'#'
+#' @return cnv_region_counter used to provide unique region names.
 #'
-#' @param cnv_region_counter number x where counting starts at x+1, used to provide unique region names.
+#' @noRd
+
+.get_num_cnv_gene_regions <- function(state_consensus, gene_order) {
+    cnv_region_counter = 0
+    chrs = unique(gene_order$chr)
+    for (chr in chrs) {
+        gene_idx = which(gene_order$chr==chr)
+        if (length(gene_idx) < 2) { next }
+
+        chr_states = state_consensus[gene_idx]
+        prev_state = chr_states[1]
+        cnv_region_counter = cnv_region_counter + 1
+
+        for (i in seq(2,length(gene_idx))) {
+            state = chr_states[i]
+            if (state != prev_state) {
+                ## state transition
+                ## start new cnv region
+                cnv_region_counter = cnv_region_counter + 1
+            }
+
+            prev_state = state
+        }
+
+    }
+
+    return(cnv_region_counter)
+}
+
+#' @title .rename_cnv_gene_regions
+#'
+#' @description Rename cnv regions with global consistent names
+#'
+#' @param unnamed_regions list of regions returned by .define_cnv_gene_regions
+#'
+#' @param cnv_counter_start starting index of cnv counter
 #'
 #' @return regions  list containing the cnv regions defined.
 #'
 #' @noRd
 
-.define_cnv_gene_regions <- function(state_consensus, gene_order, cnv_region_counter) {
+.rename_cnv_gene_regions <- function(unnamed_regions, cnv_counter_start) {
 
-    regions = list()
+    named_regions = list()
+
+    for (ii in seq_along(unnamed_regions)) {
+        chr = as.character(unnamed_regions[[ii]]$chr)[1]
+        cnv_index = cnv_counter_start + ii
+        cnv_region_name = sprintf("%s-region_%d", chr, cnv_index)
+        named_regions[[cnv_region_name]] = unnamed_regions[[ii]]
+    }
+
+    return(named_regions)
+}
+
+#' @title .define_cnv_gene_regions
+#'
+#' @description Given the state consensus vector and gene order info, defines cnv regions
+#' based on local ordering and cnv state
+#'
+#' @param state_consensus state consensus vector
+#'
+#' @param gene_order the infercnv_obj@gene_order info
+#'
+#' @return regions  list containing the cnv regions defined.
+#'
+#' @noRd
+
+.define_cnv_gene_regions <- function(state_consensus, gene_order) {
+
+    unnamed_regions = list()
+
+    local_cnv_region_counter = 0
 
     gene_names = rownames(gene_order)
     
@@ -1000,15 +1012,14 @@ adjust_genes_regions_report <- function(hmm.infercnv_obj,
         ## pos_begin = paste(gene_order[gene_idx[1],,drop=TRUE], collapse=",")
         pos_begin = gene_order[gene_idx[1],,drop=TRUE]
         
-        cnv_region_counter = cnv_region_counter + 1
+        local_cnv_region_counter = local_cnv_region_counter + 1
 
-        cnv_region_name = sprintf("%s-region_%d", chr, cnv_region_counter)
         current_cnv_region = data.frame(state=prev_state,
                                         gene=gene_names[gene_idx[1]],
                                         chr=pos_begin$chr,
                                         start=pos_begin$start,
                                         end=pos_begin$stop) 
-        regions[[cnv_region_name]] = current_cnv_region
+        unnamed_regions[[local_cnv_region_counter]] = current_cnv_region
         
         for (i in seq(2,length(gene_idx))) {
             state = chr_states[i]
@@ -1022,12 +1033,11 @@ adjust_genes_regions_report <- function(hmm.infercnv_obj,
             if (state != prev_state) {
                 ## state transition
                 ## start new cnv region
-                cnv_region_counter = cnv_region_counter + 1
-                cnv_region_name = sprintf("%s-region_%d", chr, cnv_region_counter)
-                regions[[cnv_region_name]] = next_gene_entry
+                cnv_regionlocal_cnv_region_counter_counter = local_cnv_region_counter + 1
+                unnamed_regions[[local_cnv_region_counter]] = next_gene_entry
             } else {
                 ## append gene to current cnv region
-                regions[[cnv_region_name]] = rbind(regions[[cnv_region_name]], next_gene_entry)
+                unnamed_regions[[local_cnv_region_counter]] = rbind(unnamed_regions[[local_cnv_region_counter]], next_gene_entry)
             }
 
             prev_state = state
@@ -1035,7 +1045,7 @@ adjust_genes_regions_report <- function(hmm.infercnv_obj,
         
     }
 
-    return(regions)
+    return(unnamed_regions)
 }
 
 
@@ -1186,4 +1196,3 @@ assign_HMM_states_to_proxy_expr_vals <- function(infercnv_obj) {
     return(infercnv_obj)
 
 }
-
