@@ -23,6 +23,7 @@ RUN R -e "install.packages(c('cluster', 'Seurat', 'optparse', 'igraph', 'reshape
 
 # Checkout and install infercnv
 # update to version bump commit
+# this branch modifies inferCNV_HMM.R to add parallel as described here: https://github.com/broadinstitute/infercnv/blob/10fccfac6edc0962db509b2ffb4d2d31c5033ec2/R/inferCNV_HMM.R
 RUN git clone https://github.com/p4rkerw/infercnv && cd infercnv && \
       git checkout master && \
       R CMD INSTALL . 
