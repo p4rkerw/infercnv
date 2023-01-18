@@ -23,8 +23,8 @@ RUN R -e "install.packages(c('cluster', 'Seurat', 'optparse', 'igraph', 'reshape
 
 # Checkout and install infercnv
 # update to version bump commit
-RUN git clone https://github.com/broadinstitute/infercnv && cd infercnv && \
-      git checkout master && git checkout 1b46b48303bac4a882bcb758e78fcf7f832fdefb && \
+RUN git clone https://github.com/p4rkerw/infercnv && cd infercnv && \
+      git checkout master && \
       R CMD INSTALL . 
 
 ENV PATH=${PATH}:/infercnv/scripts
